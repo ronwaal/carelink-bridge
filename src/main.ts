@@ -14,6 +14,7 @@ import { CareLinkClient } from './carelink/client.js';
 import { transform } from './transform/index.js';
 import { makeRecencyFilter } from './filter.js';
 import { upload } from './nightscout/upload.js';
+import { assertNightscoutEndpoint } from './nightscout/preflight.js';
 import * as logger from './logger.js';
 import { login, LOGINDATA_FILE } from './login.js';
 import type { NightscoutSGVEntry, NightscoutDeviceStatus } from './types/nightscout.js';
@@ -30,7 +31,7 @@ const client = new CareLinkClient({
   lang: config.language,
 });
 
-const baseUrl = config.nsBaseUrl || ('https://' + config.nsHost);
+const baseUrl = (config.nsBaseUrl || ('https://' + config.nsHost)).replace(/\/+$/, '');
 const entriesUrl = baseUrl + '/api/v1/entries.json';
 const devicestatusUrl = baseUrl + '/api/v1/devicestatus.json';
 
@@ -52,7 +53,8 @@ async function uploadIfNew(items: unknown[], endpoint: string): Promise<void> {
     await upload(items, endpoint, config.nsSecret);
   } catch (err) {
     // Continue even if Nightscout can't be reached
-    console.error(err);
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[Bridge] Nightscout upload failed:', message);
   }
 }
 
@@ -97,6 +99,7 @@ async function ensureLogin(): Promise<void> {
 // Start
 try {
   await ensureLogin();
+  await assertNightscoutEndpoint(baseUrl, config.nsSecret);
   console.log(`[Bridge] Starting — interval set to ${config.interval / 1000}s`);
   console.log('[Bridge] Fetching data now...');
   await requestLoop();

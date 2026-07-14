@@ -14,6 +14,22 @@ describe('transform()', () => {
     expect(result.entries[0].device).toBe('connect-foo');
   });
 
+  it('should use Care Partner timestamp when datetime is absent', () => {
+    const result = transform(data({
+      sMedicalDeviceTime: '',
+      sgs: [{
+        kind: 'SG',
+        version: 1,
+        sg: 100,
+        timestamp: '2015-10-17T09:05:00',
+      }],
+    }));
+
+    expect(result.entries).toHaveLength(1);
+    expect(Number.isFinite(result.entries[0].date)).toBe(true);
+    expect(result.entries[0].dateString).toBe(new Date(result.entries[0].date).toISOString());
+  });
+
   it('should discard data more than 20 minutes old', () => {
     const pumpTimeString = 'Oct 17, 2015 09:06:33';
     const now = Date.parse('Oct 17, 2015 09:09:14');

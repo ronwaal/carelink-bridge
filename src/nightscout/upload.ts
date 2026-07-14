@@ -7,7 +7,7 @@ export async function upload(
   endpoint: string,
   secret: string,
 ): Promise<void> {
-  logger.log('POST ' + endpoint + ' ' + JSON.stringify(entries));
+  logger.log('POST ' + endpoint + ' itemCount=' + entries.length);
 
   const hashedSecret = crypto.createHash('sha1').update(secret).digest('hex');
 
