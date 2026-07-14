@@ -6,13 +6,14 @@ import * as logger from '../logger.js';
 import { loadLoginData, saveLoginData, isTokenExpired, refreshToken } from './token.js';
 import { loadProxyList, createProxyAgent, ProxyRotator } from './proxy.js';
 import { resolveServerName, buildUrls, type CareLinkUrls } from './urls.js';
-import type { CareLinkData, CareLinkUserInfo, CareLinkPatientLink, CareLinkCountrySettings } from '../types/carelink.js';
+import type { CareLinkData, CareLinkUserInfo, CareLinkPatientLink, CareLinkCountrySettings, DiscoverResponse, LoginData } from '../types/carelink.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const MAX_REQUESTS_PER_FETCH = 30;
 const DEFAULT_MAX_RETRY_DURATION = 512;
+const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 
 export interface CareLinkClientOptions {
   username: string;
@@ -32,6 +33,7 @@ export class CareLinkClient {
   private loginDataPath: string;
   private serverName: string;
   private options: CareLinkClientOptions;
+  private loginData: LoginData | null = null;
   private requestCount = 0;
 
   constructor(options: CareLinkClientOptions) {
@@ -56,14 +58,15 @@ export class CareLinkClient {
     // Set up axios
     this.axiosInstance = axios.create({
       maxRedirects: 0,
-      timeout: 15_000,
+      timeout: DEFAULT_REQUEST_TIMEOUT_MS,
     });
 
-    // Response interceptor: treat 2xx/3xx as success
+    // Response interceptor: only API success responses are allowed here.
+    // A 3xx usually means CareLink redirected us back to login.
     this.axiosInstance.interceptors.response.use(
       response => response,
       error => {
-        if (error.response?.status >= 200 && error.response?.status < 400) {
+        if (error.response?.status >= 200 && error.response?.status < 300) {
           return error.response;
         }
         return Promise.reject(error);
@@ -105,7 +108,7 @@ export class CareLinkClient {
     }
   }
 
-  private async authenticate(): Promise<void> {
+  private async authenticate(forceRefresh = false): Promise<void> {
     let loginData = loadLoginData(this.loginDataPath);
     if (!loginData) {
       throw new Error(
@@ -113,20 +116,64 @@ export class CareLinkClient {
       );
     }
 
-    if (isTokenExpired(loginData.access_token)) {
+    if (forceRefresh || isTokenExpired(loginData.access_token)) {
       try {
-        loginData = await refreshToken(loginData);
+        loginData = await refreshToken(loginData, { timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS });
         saveLoginData(this.loginDataPath, loginData);
       } catch (e) {
-        // Delete stale logindata so next startup triggers re-login
-        try { fs.unlinkSync(this.loginDataPath); } catch { /* ignore */ }
-        console.error('[Token] Deleted logindata.json — run "npm run login" to re-authenticate.');
-        throw new Error('Refresh token expired. Run "npm run login" to log in again.');
+        const status = (e as { response?: { status?: number } }).response?.status;
+        if (status === 400 || status === 401 || status === 403) {
+          // Delete stale logindata so next startup triggers re-login.
+          try { fs.unlinkSync(this.loginDataPath); } catch { /* ignore */ }
+          console.error('[Token] Deleted logindata.json — run "npm run login" to re-authenticate.');
+          throw new Error('Refresh token expired. Run "npm run login" to log in again.');
+        }
+        throw e;
       }
     }
 
     this.axiosInstance.defaults.headers.common['Authorization'] = 'Bearer ' + loginData.access_token;
+    this.loginData = loginData;
     console.log('[Token] Using token-based auth from logindata.json');
+  }
+
+  async reauthenticate(): Promise<void> {
+    this.requestCount = 0;
+    await this.authenticate(true);
+  }
+
+  private tokenPreferredUsername(): string | null {
+    try {
+      const token = this.loginData?.access_token;
+      if (!token) return null;
+      const payload = token.split('.')[1];
+      if (!payload) return null;
+      const normalized = payload.replace(/-/g, '+').replace(/_/g, '/');
+      const padded = normalized + '='.repeat((4 - normalized.length % 4) % 4);
+      const decoded = JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
+      return decoded?.token_details?.preferred_username || decoded?.preferred_username || null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async getCarePartnerAppConfig(): Promise<{ baseUrlCareLink: string; baseUrlCumulus: string }> {
+    const isUS = this.serverName.toLowerCase().includes('minimed.com') && !this.serverName.toLowerCase().includes('minimed.eu');
+    const discoveryUrl = isUS
+      ? 'https://clcloud.minimed.com/connect/carepartner/v13/discover/android/3.6'
+      : 'https://clcloud.minimed.eu/connect/carepartner/v13/discover/android/3.6';
+    const resp = await axios.get<DiscoverResponse>(discoveryUrl, {
+      timeout: DEFAULT_REQUEST_TIMEOUT_MS,
+    });
+    const region = isUS ? 'us' : 'eu';
+    const entry = resp.data.CP.find(item => item.region.toLowerCase() === region) || resp.data.CP[0];
+    if (!entry?.baseUrlCareLink || !entry?.baseUrlCumulus) {
+      throw new Error('Could not resolve Care Partner app API base URLs');
+    }
+    return {
+      baseUrlCareLink: entry.baseUrlCareLink,
+      baseUrlCumulus: entry.baseUrlCumulus,
+    };
   }
 
   private async getCurrentRole(): Promise<string> {
@@ -145,71 +192,40 @@ export class CareLinkClient {
   }
 
   private async fetchAsCarepartner(_role: string): Promise<CareLinkData> {
+    const appConfig = await this.getCarePartnerAppConfig();
     let patientId = this.options.patientId;
 
     if (!patientId) {
-      const patientsResp = await this.axiosInstance.get<CareLinkPatientLink[]>(this.urls.linkedPatients);
+      const patientsResp = await this.axiosInstance.get<CareLinkPatientLink[]>(`${appConfig.baseUrlCareLink}/links/patients`);
       if (patientsResp.data?.length > 0) {
         patientId = patientsResp.data[0].username;
-        logger.log('Using linked patient:', patientId);
+        logger.log('Using linked patient');
       } else {
         throw new Error('No linked patients found for care partner account');
       }
     }
 
-    // Check if patient has a BLE device by fetching monitor data first
-    try {
-      const monitorResp = await this.axiosInstance.get<CareLinkData>(this.urls.monitorData);
-      if (monitorResp.data && this.isBleDevice(monitorResp.data.medicalDeviceFamily)) {
-        logger.log('BLE device detected for carepartner, using BLE endpoint');
-        return this.fetchBleDeviceData(patientId, 'carepartner');
-      }
-    } catch {
-      // Fall through to standard carepartner flow
-    }
-
-    // Standard carepartner flow: BLE endpoint with multi-version fallback
-    logger.log('Fetching country settings from:', this.urls.countrySettings);
-    const settingsResp = await this.axiosInstance.get<CareLinkCountrySettings>(this.urls.countrySettings);
-    const dataRetrievalUrl = settingsResp.data?.blePereodicDataEndpoint;
-
-    if (!dataRetrievalUrl) {
-      throw new Error('Unable to retrieve data retrieval URL for care partner account');
-    }
-
-    logger.log('Data retrieval URL:', dataRetrievalUrl);
-
-    // Try multiple API versions
-    const endpoints = [
-      dataRetrievalUrl,
-      dataRetrievalUrl.replace('/v6/', '/v5/'),
-      dataRetrievalUrl.replace('/v6/', '/v11/'),
-      dataRetrievalUrl.replace('/v5/', '/v6/'),
-      dataRetrievalUrl.replace('/v5/', '/v11/'),
-    ];
-
+    const endpoint = `${appConfig.baseUrlCumulus}/display/message`;
+    const username = this.tokenPreferredUsername() || this.options.username;
     const body: Record<string, string> = {
-      username: this.options.username,
+      username,
       role: 'carepartner',
       patientId,
     };
 
-    for (const endpoint of endpoints) {
-      try {
-        logger.log('Trying carepartner endpoint:', endpoint);
-        const resp = await this.axiosInstance.post<CareLinkData>(endpoint, body, {
-          headers: { 'Content-Type': 'application/json' },
-        });
-        if (resp.status === 200) {
-          logger.log('GET data (as carepartner)', endpoint);
-          return resp.data;
-        }
-      } catch {
-        logger.log('Endpoint failed:', endpoint);
-      }
+    logger.log('Trying Care Partner app endpoint:', endpoint);
+    const resp = await this.axiosInstance.post<CareLinkData & { patientData?: CareLinkData }>(endpoint, body, {
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/plain, */*',
+      },
+    });
+    if (resp.status === 200) {
+      logger.log('GET data (as carepartner)', endpoint);
+      return resp.data.patientData ?? resp.data;
     }
 
-    throw new Error('All carepartner data endpoints failed');
+    throw new Error('Care Partner app endpoint failed');
   }
 
   private isBleDevice(deviceFamily: string | undefined): boolean {

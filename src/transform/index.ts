@@ -7,10 +7,13 @@ import { guessPumpOffset, guessPumpOffsetMilliseconds } from './pump-offset.js';
 const STALE_DATA_THRESHOLD_MINUTES = 20;
 
 function parsePumpTime(
-  pumpTimeString: string,
+  pumpTimeString: string | undefined,
   _offset: string,
   offsetMilliseconds: number,
 ): number {
+  if (!pumpTimeString) {
+    return NaN;
+  }
   return Date.parse(pumpTimeString) - offsetMilliseconds;
 }
 
@@ -94,7 +97,7 @@ function sgvEntries(
   const sgvs: NightscoutSGVEntry[] = data.sgs
     .filter(entry => entry.kind === 'SG' && entry.sg !== 0)
     .map(sgv => {
-      const timestamp = parsePumpTime(sgv.datetime, offset, offsetMilliseconds);
+      const timestamp = parsePumpTime(sgv.datetime ?? sgv.timestamp, offset, offsetMilliseconds);
       return {
         type: 'sgv' as const,
         sgv: sgv.sg,

@@ -1,9 +1,11 @@
 export interface CareLinkSG {
   sg: number;
-  datetime: string;
+  datetime?: string;
+  timestamp?: string;
   version: number;
-  timeChange: boolean;
+  timeChange?: boolean;
   kind: 'SG';
+  sensorState?: string;
 }
 
 export interface CareLinkActiveInsulin {
@@ -27,7 +29,7 @@ export interface CareLinkData {
   lastSG: CareLinkSG;
   lastSGTrend: string;
   currentServerTime: number;
-  sMedicalDeviceTime: string;
+  sMedicalDeviceTime?: string;
   lastMedicalDeviceDataUpdateServerTime: number;
   medicalDeviceFamily: string;
   medicalDeviceBatteryLevelPercent: number;
@@ -82,6 +84,7 @@ export interface LoginData {
   client_id: string;
   token_url: string;
   audience?: string;
+  'mag-identifier'?: string;
 }
 
 export interface Auth0SSOConfig {
@@ -103,10 +106,13 @@ export interface Auth0SSOConfig {
 }
 
 export interface DiscoverResponse {
+  supportedCountries?: Array<Record<string, { region: string }>>;
   CP: Array<{
     region: string;
     UseSSOConfiguration?: string;
     Auth0SSOConfiguration?: string;
+    baseUrlCareLink?: string;
+    baseUrlCumulus?: string;
     [key: string]: unknown;
   }>;
 }
