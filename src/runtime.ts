@@ -291,8 +291,6 @@ export class BridgeRuntime {
 
     try {
       const data = await this.fetchCareLinkDataWithRecovery(cycle);
-      this.assertValidCareLinkData(data);
-
       const transformed = this.dependencies.transformData(data, this.options.sgvLimit);
       const entriesReceived = Array.isArray(data.sgs) ? data.sgs.length : 0;
       const sgvsValid = transformed.entries.length;
@@ -343,15 +341,7 @@ export class BridgeRuntime {
 
   private async fetchCareLinkDataWithRecovery(cycle: number): Promise<CareLinkData> {
     try {
-      return await this.withTimeout(
-        this.dependencies.fetchCareLinkData,
-        this.options.careLinkFetchTimeoutMs ?? DEFAULT_CARELINK_FETCH_TIMEOUT_MS,
-        new BridgeError('CareLink fetch timed out', {
-          category: 'CARELINK_FETCH_TIMEOUT',
-          recoverable: true,
-          code: 'ETIMEDOUT',
-        }),
-      );
+      return await this.fetchCareLinkDataOnce();
     } catch (error) {
       const classified = classifyCareLinkError(error);
       if (!isCareLinkAuthCategory(classified.category) || !this.dependencies.reauthenticateCareLink) {
@@ -393,15 +383,7 @@ export class BridgeRuntime {
       this.logger.info('carelink session recovery completed', { cycle });
 
       try {
-        return await this.withTimeout(
-          this.dependencies.fetchCareLinkData,
-          this.options.careLinkFetchTimeoutMs ?? DEFAULT_CARELINK_FETCH_TIMEOUT_MS,
-          new BridgeError('CareLink fetch timed out', {
-            category: 'CARELINK_FETCH_TIMEOUT',
-            recoverable: true,
-            code: 'ETIMEDOUT',
-          }),
-        );
+        return await this.fetchCareLinkDataOnce();
       } catch (retryError) {
         const retryClassified = classifyCareLinkError(retryError);
         if (isCareLinkAuthCategory(retryClassified.category)) {
@@ -418,18 +400,65 @@ export class BridgeRuntime {
     }
   }
 
-  private assertValidCareLinkData(data: CareLinkData): void {
-    if (
-      !data ||
-      typeof data !== 'object' ||
-      !Array.isArray(data.sgs) ||
-      data.lastMedicalDeviceDataUpdateServerTime === undefined
-    ) {
+  private async fetchCareLinkDataOnce(): Promise<CareLinkData> {
+    const data = await this.withTimeout(
+      this.dependencies.fetchCareLinkData,
+      this.options.careLinkFetchTimeoutMs ?? DEFAULT_CARELINK_FETCH_TIMEOUT_MS,
+      new BridgeError('CareLink fetch timed out', {
+        category: 'CARELINK_FETCH_TIMEOUT',
+        recoverable: true,
+        code: 'ETIMEDOUT',
+      }),
+    );
+    this.assertValidCareLinkData(data);
+    return data;
+  }
+
+  private assertValidCareLinkData(data: unknown): asserts data is CareLinkData {
+    if (this.looksLikeCareLinkLoginResponse(data)) {
+      throw new BridgeError('CareLink returned a login response instead of pump data', {
+        category: 'CARELINK_AUTH_EXPIRED',
+        recoverable: true,
+      });
+    }
+
+    if (!data || typeof data !== 'object') {
       throw new BridgeError('CareLink response missed expected fields', {
         category: 'CARELINK_INVALID_RESPONSE',
         recoverable: true,
       });
     }
+
+    const record = data as Partial<CareLinkData>;
+    if (!Array.isArray(record.sgs) || record.lastMedicalDeviceDataUpdateServerTime === undefined) {
+      throw new BridgeError('CareLink response missed expected fields', {
+        category: 'CARELINK_INVALID_RESPONSE',
+        recoverable: true,
+      });
+    }
+  }
+
+  private looksLikeCareLinkLoginResponse(data: unknown): boolean {
+    const loginPattern = /\b(login|sign[\s-]?in|oauth|authorize|saml|session\s*expired)\b/i;
+
+    if (typeof data === 'string') {
+      return /<html|<!doctype/i.test(data) && loginPattern.test(data);
+    }
+
+    if (!data || typeof data !== 'object') return false;
+
+    const record = data as Record<string, unknown>;
+    const fields = [
+      record['redirect'],
+      record['redirectUrl'],
+      record['location'],
+      record['loginUrl'],
+      record['message'],
+      record['error'],
+      record['error_description'],
+    ];
+
+    return fields.some(value => typeof value === 'string' && loginPattern.test(value));
   }
 
   private async uploadIfNew<T>(

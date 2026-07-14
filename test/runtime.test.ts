@@ -192,6 +192,31 @@ describe('BridgeRuntime', () => {
     expect(harness.lines.join('\n')).toContain('carelink session recovery completed');
   });
 
+  it('performs one CareLink reauthentication after a login page response', async () => {
+    let fetches = 0;
+    let reauths = 0;
+    const harness = createRuntime({
+      maxRetries: 0,
+      fetchCareLinkData: async () => {
+        fetches += 1;
+        if (fetches === 1) {
+          return '<html><body>CareLink login session expired</body></html>' as unknown as CareLinkData;
+        }
+        return careLinkData();
+      },
+      reauthenticateCareLink: async () => {
+        reauths += 1;
+      },
+    });
+
+    const result = await harness.runtime.runCycleForTest();
+
+    expect(result.success).toBe(true);
+    expect(fetches).toBe(2);
+    expect(reauths).toBe(1);
+    expect(harness.lines.join('\n')).toContain('CARELINK_AUTH_EXPIRED');
+  });
+
   it('does not enter an infinite loop when CareLink reauthentication fails', async () => {
     let reauths = 0;
     const harness = createRuntime({
@@ -208,6 +233,30 @@ describe('BridgeRuntime', () => {
       category: 'CARELINK_AUTH_FAILED',
       recoverable: false,
     });
+    expect(reauths).toBe(1);
+  });
+
+  it('does not enter an infinite loop when login page persists after reauthentication', async () => {
+    let fetches = 0;
+    let reauths = 0;
+    const harness = createRuntime({
+      maxRetries: 1,
+      fetchCareLinkData: async () => {
+        fetches += 1;
+        return {
+          redirectUrl: 'https://carelink.example/login',
+        } as unknown as CareLinkData;
+      },
+      reauthenticateCareLink: async () => {
+        reauths += 1;
+      },
+    });
+
+    await expect(harness.runtime.runCycleForTest()).rejects.toMatchObject({
+      category: 'CARELINK_AUTH_FAILED',
+      recoverable: false,
+    });
+    expect(fetches).toBe(2);
     expect(reauths).toBe(1);
   });
 
