@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { makeRecencyFilter } from '../src/filter.js';
+import { makeCommitRecencyFilter, makeRecencyFilter } from '../src/filter.js';
 
 describe('makeRecencyFilter()', () => {
   it('should return a stateful filter which discards items older than the most recent one seen', () => {
@@ -24,5 +24,14 @@ describe('makeRecencyFilter()', () => {
     for (const val of [5, 6, 7, 8]) {
       expect(dates).toContain(val);
     }
+  });
+
+  it('can start from a known committed timestamp', () => {
+    const filter = makeCommitRecencyFilter<{ at: number }>(item => item.at, 10);
+    const selected = filter.select([{ at: 9 }, { at: 10 }, { at: 11 }]);
+
+    expect(selected).toEqual([{ at: 11 }]);
+    filter.commit(selected);
+    expect(filter.lastCommittedTime()).toBe(11);
   });
 });

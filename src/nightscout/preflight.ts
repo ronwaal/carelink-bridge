@@ -1,14 +1,22 @@
 import crypto from 'node:crypto';
 import axios from 'axios';
 
-export async function assertNightscoutEndpoint(baseUrl: string, secret: string): Promise<void> {
+export interface NightscoutPreflightOptions {
+  timeoutMs?: number;
+}
+
+export async function assertNightscoutEndpoint(
+  baseUrl: string,
+  secret: string,
+  options: NightscoutPreflightOptions = {},
+): Promise<void> {
   const statusUrl = baseUrl.replace(/\/+$/, '') + '/api/v1/status.json';
   const hashedSecret = crypto.createHash('sha1').update(secret).digest('hex');
 
   try {
     const response = await axios.get(statusUrl, {
       headers: { 'api-secret': hashedSecret },
-      timeout: 10000,
+      timeout: options.timeoutMs ?? 10_000,
       validateStatus: () => true,
     });
 

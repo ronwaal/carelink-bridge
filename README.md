@@ -86,6 +86,12 @@ All settings go in the `.env` file. Only the first four are required — the res
 | `CARELINK_INTERVAL` | `300` | How often to fetch data, in seconds (300 = 5 minutes) |
 | `CARELINK_PATIENT` | | Patient username, only needed if your care partner account has multiple patients |
 | `CARELINK_QUIET` | `true` | Set to `false` to see more detailed logs |
+| `CARELINK_MAX_RETRIES` | `3` | Maximum bounded retries inside one failed polling cycle |
+| `CARELINK_HEARTBEAT_INTERVAL` | `60` | How often to log a compact heartbeat while waiting, in seconds |
+| `CARELINK_LOGIN_TIMEOUT` | `120` | Maximum time for login or token-refresh recovery, in seconds |
+| `CARELINK_FETCH_TIMEOUT` | `30` | Maximum time for a CareLink fetch cycle, in seconds |
+| `NIGHTSCOUT_PREFLIGHT_TIMEOUT` | `10` | Maximum time for the Nightscout startup check, in seconds |
+| `NIGHTSCOUT_UPLOAD_TIMEOUT` | `15` | Maximum time for each Nightscout upload request, in seconds |
 
 ## For developers
 

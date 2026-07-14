@@ -43,7 +43,14 @@ export function isTokenExpired(accessToken: string): boolean {
   }
 }
 
-export async function refreshToken(loginData: LoginData): Promise<LoginData> {
+export interface RefreshTokenOptions {
+  timeoutMs?: number;
+}
+
+export async function refreshToken(
+  loginData: LoginData,
+  options: RefreshTokenOptions = {},
+): Promise<LoginData> {
   console.log('[Token] Refreshing access token...');
 
   const resp = await axios.post(
@@ -53,7 +60,10 @@ export async function refreshToken(loginData: LoginData): Promise<LoginData> {
       client_id: loginData.client_id,
       refresh_token: loginData.refresh_token,
     }),
-    { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
+    {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      timeout: options.timeoutMs ?? 15_000,
+    },
   );
 
   loginData.access_token = resp.data.access_token;

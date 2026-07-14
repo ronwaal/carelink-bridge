@@ -13,6 +13,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const MAX_REQUESTS_PER_FETCH = 30;
 const DEFAULT_MAX_RETRY_DURATION = 512;
+const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 
 export interface CareLinkClientOptions {
   username: string;
@@ -57,14 +58,15 @@ export class CareLinkClient {
     // Set up axios
     this.axiosInstance = axios.create({
       maxRedirects: 0,
-      timeout: 15_000,
+      timeout: DEFAULT_REQUEST_TIMEOUT_MS,
     });
 
-    // Response interceptor: treat 2xx/3xx as success
+    // Response interceptor: only API success responses are allowed here.
+    // A 3xx usually means CareLink redirected us back to login.
     this.axiosInstance.interceptors.response.use(
       response => response,
       error => {
-        if (error.response?.status >= 200 && error.response?.status < 400) {
+        if (error.response?.status >= 200 && error.response?.status < 300) {
           return error.response;
         }
         return Promise.reject(error);
@@ -106,7 +108,7 @@ export class CareLinkClient {
     }
   }
 
-  private async authenticate(): Promise<void> {
+  private async authenticate(forceRefresh = false): Promise<void> {
     let loginData = loadLoginData(this.loginDataPath);
     if (!loginData) {
       throw new Error(
@@ -114,21 +116,30 @@ export class CareLinkClient {
       );
     }
 
-    if (isTokenExpired(loginData.access_token)) {
+    if (forceRefresh || isTokenExpired(loginData.access_token)) {
       try {
-        loginData = await refreshToken(loginData);
+        loginData = await refreshToken(loginData, { timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS });
         saveLoginData(this.loginDataPath, loginData);
       } catch (e) {
-        // Delete stale logindata so next startup triggers re-login
-        try { fs.unlinkSync(this.loginDataPath); } catch { /* ignore */ }
-        console.error('[Token] Deleted logindata.json — run "npm run login" to re-authenticate.');
-        throw new Error('Refresh token expired. Run "npm run login" to log in again.');
+        const status = (e as { response?: { status?: number } }).response?.status;
+        if (status === 400 || status === 401 || status === 403) {
+          // Delete stale logindata so next startup triggers re-login.
+          try { fs.unlinkSync(this.loginDataPath); } catch { /* ignore */ }
+          console.error('[Token] Deleted logindata.json — run "npm run login" to re-authenticate.');
+          throw new Error('Refresh token expired. Run "npm run login" to log in again.');
+        }
+        throw e;
       }
     }
 
     this.axiosInstance.defaults.headers.common['Authorization'] = 'Bearer ' + loginData.access_token;
     this.loginData = loginData;
     console.log('[Token] Using token-based auth from logindata.json');
+  }
+
+  async reauthenticate(): Promise<void> {
+    this.requestCount = 0;
+    await this.authenticate(true);
   }
 
   private tokenPreferredUsername(): string | null {
@@ -151,7 +162,9 @@ export class CareLinkClient {
     const discoveryUrl = isUS
       ? 'https://clcloud.minimed.com/connect/carepartner/v13/discover/android/3.6'
       : 'https://clcloud.minimed.eu/connect/carepartner/v13/discover/android/3.6';
-    const resp = await axios.get<DiscoverResponse>(discoveryUrl);
+    const resp = await axios.get<DiscoverResponse>(discoveryUrl, {
+      timeout: DEFAULT_REQUEST_TIMEOUT_MS,
+    });
     const region = isUS ? 'us' : 'eu';
     const entry = resp.data.CP.find(item => item.region.toLowerCase() === region) || resp.data.CP[0];
     if (!entry?.baseUrlCareLink || !entry?.baseUrlCumulus) {
@@ -186,7 +199,7 @@ export class CareLinkClient {
       const patientsResp = await this.axiosInstance.get<CareLinkPatientLink[]>(`${appConfig.baseUrlCareLink}/links/patients`);
       if (patientsResp.data?.length > 0) {
         patientId = patientsResp.data[0].username;
-        logger.log('Using linked patient:', patientId);
+        logger.log('Using linked patient');
       } else {
         throw new Error('No linked patients found for care partner account');
       }
